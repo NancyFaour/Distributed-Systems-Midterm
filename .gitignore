@@ -5,3 +5,5 @@ __pycache__/
 .env
 .tools/
 .setup-status.log
+~$*
+~WRL*.tmp
