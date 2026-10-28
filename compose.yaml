@@ -1,5 +1,33 @@
 name: distributed-systems-midterm
+x-storage-node: &storage-node
+  image: distributed-storage-node:local
+  depends_on:
+    metadata-service:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 10s
+
 services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: storage
+      POSTGRES_DB: storage
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U storage -d storage" ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
   kafka:
     image: apache/kafka:4.4.0@sha256:833b867a9585a141da455dc2b57431c65cbccb27f11c91f694444cca9f777e0f
     ports:
@@ -75,8 +103,150 @@ services:
       interval: 10s
       timeout: 5s
       retries: 12
+  metadata-service:
+    image: distributed-storage-node:local
+    command: ["python", "-m", "uvicorn", "metadata_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      METADATA_DATA_DIR: /data
+      HEARTBEAT_TIMEOUT_SECONDS: "15"
+    ports:
+      - "127.0.0.1:8010:8000"
+    volumes:
+      - metadata-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  storage-node-1:
+    <<: *storage-node
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ID: node-1
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-1:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - storage-node-1-data:/data
+  storage-node-2:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-2
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-2:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8002:8000"
+    volumes:
+      - storage-node-2-data:/data
+
+  storage-node-3:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-3
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-3:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8003:8000"
+    volumes:
+      - storage-node-3-data:/data
+
+  storage-node-4:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-4
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-4:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8004:8000"
+    volumes:
+      - storage-node-4-data:/data
+  storage-node-5:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-5
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-5:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8005:8000"
+    volumes:
+      - storage-node-5-data:/data
+
+  storage-node-6:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-6
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-6:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8006:8000"
+    volumes:
+      - storage-node-6-data:/data
+
+  storage-node-7:
+    <<: *storage-node
+    environment:
+      NODE_ID: node-7
+      DATA_DIR: /data
+      METADATA_URL: http://metadata-service:8000
+      STORAGE_URL: http://storage-node-7:8000
+      HEARTBEAT_INTERVAL_SECONDS: "5"
+    ports:
+      - "127.0.0.1:8007:8000"
+    volumes:
+      - storage-node-7-data:/data
+
+  recovery-service:
+    image: distributed-storage-node:local
+    command: ["python", "-m", "uvicorn", "recovery_service:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      HEARTBEAT_REGISTRY_URL: http://metadata-service:8000
+      SCRUB_INTERVAL_SECONDS: "20"
+      STORAGE_NODES: '{"node-1":"http://storage-node-1:8000","node-2":"http://storage-node-2:8000","node-3":"http://storage-node-3:8000","node-4":"http://storage-node-4:8000","node-5":"http://storage-node-5:8000","node-6":"http://storage-node-6:8000","node-7":"http://storage-node-7:8000"}'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      metadata-service:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8020:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
 volumes:
   kafka-data:
   rabbitmq-data:
   prometheus-data:
   grafana-data:
+  storage-node-1-data:
+  storage-node-2-data:
+  storage-node-3-data:
+  storage-node-4-data:
+  metadata-data:
+  postgres-data:
+  storage-node-5-data:
+  storage-node-6-data:
+  storage-node-7-data:

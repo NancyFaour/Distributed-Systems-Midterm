@@ -1,0 +1,13 @@
+.git/
+.idea/
+.venv/
+.tools/
+__pycache__/
+*.pyc
+.env
+.setup-status.log
+data/
+outputs/
+*.docx
+~$*
+~WRL*.tmp
