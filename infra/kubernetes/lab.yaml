@@ -1,0 +1,1108 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage-lab
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storage-config
+  namespace: storage-lab
+data:
+  POSTGRES_HOST: postgres-ha-rw
+  POSTGRES_PORT: '5432'
+  METADATA_BACKEND: postgres
+  HEARTBEAT_REGISTRY_URL: http://metadata-service:8000
+  METADATA_URL: http://metadata-service:8000
+  STORAGE_NODES: '{"storage-0": "http://storage-0.storage-headless:8000", "storage-1":
+    "http://storage-1.storage-headless:8000", "storage-2": "http://storage-2.storage-headless:8000",
+    "storage-3": "http://storage-3.storage-headless:8000", "storage-4": "http://storage-4.storage-headless:8000",
+    "storage-5": "http://storage-5.storage-headless:8000", "storage-6": "http://storage-6.storage-headless:8000",
+    "storage-7": "http://storage-7.storage-headless:8000"}'
+  INITIAL_STORAGE_NODES: '{"storage-0": "http://storage-0.storage-headless:8000",
+    "storage-1": "http://storage-1.storage-headless:8000", "storage-2": "http://storage-2.storage-headless:8000",
+    "storage-3": "http://storage-3.storage-headless:8000", "storage-4": "http://storage-4.storage-headless:8000",
+    "storage-5": "http://storage-5.storage-headless:8000", "storage-6": "http://storage-6.storage-headless:8000"}'
+  ELASTICSEARCH_URL: http://elasticsearch:9200
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_USER: midterm
+  JOB_QUEUE_ENABLED: 'true'
+  SCRUB_INTERVAL_SECONDS: '60'
+  ROOT_PATH: /api
+  RATE_LIMIT_PER_MINUTE: '300'
+  HEARTBEAT_TIMEOUT_SECONDS: '15'
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: storage-migrate
+  namespace: storage-lab
+spec:
+  backoffLimit: 12
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: migrate
+        image: distributed-storage-node:lab-b04fb6efde5f
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom:
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - scripts/migrate.py
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metadata-service
+  namespace: storage-lab
+spec:
+  selector:
+    app: metadata-service
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metadata-service
+  namespace: storage-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: metadata-service
+  template:
+    metadata:
+      labels:
+        app: metadata-service
+    spec:
+      containers:
+      - name: metadata-service
+        image: distributed-storage-node:lab-b04fb6efde5f
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom: &id001
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - -m
+        - uvicorn
+        - metadata_service:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      initContainers:
+      - name: wait-for-schema
+        image: distributed-storage-node:lab-b04fb6efde5f
+        imagePullPolicy: IfNotPresent
+        envFrom: *id001
+        command:
+        - python
+        - -c
+        - "import time\nfrom metadata_db import connect_db\nwhile True:\n    try:\n\
+          \        with connect_db() as connection:\n            connection.execute('SELECT\
+          \ content_type,tags FROM object_versions LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM node_heartbeats LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM maintenance_jobs LIMIT 0')\n        break\n    except Exception:\n\
+          \        print('Waiting for metadata schema', flush=True)\n        time.sleep(3)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage-headless
+  namespace: storage-lab
+spec:
+  selector:
+    app: storage
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: storage
+  namespace: storage-lab
+spec:
+  serviceName: storage-headless
+  replicas: 7
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: storage
+  template:
+    metadata:
+      labels:
+        app: storage
+    spec:
+      containers:
+      - name: storage
+        image: distributed-storage-node:lab-b04fb6efde5f
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom:
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - -m
+        - uvicorn
+        - storage_node:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+        env:
+        - name: NODE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: STORAGE_URL
+          value: http://$(POD_NAME).storage-headless:8000
+        - name: DATA_DIR
+          value: /data
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      securityContext:
+        fsGroup: 1000
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway
+  namespace: storage-lab
+spec:
+  selector:
+    app: gateway
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: storage-lab
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: gateway
+  template:
+    metadata:
+      labels:
+        app: gateway
+    spec:
+      containers:
+      - name: gateway
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom: &id001
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - -m
+        - uvicorn
+        - gateway:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      initContainers:
+      - name: wait-for-schema
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        envFrom: *id001
+        command:
+        - python
+        - -c
+        - "import time\nfrom metadata_db import connect_db\nwhile True:\n    try:\n\
+          \        with connect_db() as connection:\n            connection.execute('SELECT\
+          \ content_type,tags FROM object_versions LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM node_heartbeats LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM maintenance_jobs LIMIT 0')\n        break\n    except Exception:\n\
+          \        print('Waiting for metadata schema', flush=True)\n        time.sleep(3)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-1
+  namespace: storage-lab
+spec:
+  selector:
+    app: gateway
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-2
+  namespace: storage-lab
+spec:
+  selector:
+    app: gateway
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: storage-lab
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom: &id001
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - job_queue.py
+      initContainers:
+      - name: wait-for-schema
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        envFrom: *id001
+        command:
+        - python
+        - -c
+        - "import time\nfrom metadata_db import connect_db\nwhile True:\n    try:\n\
+          \        with connect_db() as connection:\n            connection.execute('SELECT\
+          \ content_type,tags FROM object_versions LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM node_heartbeats LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM maintenance_jobs LIMIT 0')\n        break\n    except Exception:\n\
+          \        print('Waiting for metadata schema', flush=True)\n        time.sleep(3)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: recovery-service
+  namespace: storage-lab
+spec:
+  selector:
+    app: recovery-service
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: recovery-service
+  namespace: storage-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: recovery-service
+  template:
+    metadata:
+      labels:
+        app: recovery-service
+    spec:
+      containers:
+      - name: recovery
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        envFrom: &id001
+        - configMapRef:
+            name: storage-config
+        - secretRef:
+            name: storage-secrets
+        command:
+        - python
+        - -m
+        - uvicorn
+        - recovery_service:app
+        - --host
+        - 0.0.0.0
+        - --port
+        - '8000'
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      initContainers:
+      - name: wait-for-schema
+        image: distributed-storage-node:lab-e51a9faa25a3
+        imagePullPolicy: IfNotPresent
+        envFrom: *id001
+        command:
+        - python
+        - -c
+        - "import time\nfrom metadata_db import connect_db\nwhile True:\n    try:\n\
+          \        with connect_db() as connection:\n            connection.execute('SELECT\
+          \ content_type,tags FROM object_versions LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM node_heartbeats LIMIT 0')\n            connection.execute('SELECT\
+          \ 1 FROM maintenance_jobs LIMIT 0')\n        break\n    except Exception:\n\
+          \        print('Waiting for metadata schema', flush=True)\n        time.sleep(3)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+  namespace: storage-lab
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - name: http
+    port: 5672
+    targetPort: 5672
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-headless
+  namespace: storage-lab
+spec:
+  selector:
+    app: rabbitmq
+  ports:
+  - name: http
+    port: 5672
+    targetPort: 5672
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+  namespace: storage-lab
+spec:
+  serviceName: rabbitmq-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      containers:
+      - name: rabbitmq
+        image: rabbitmq:4-management
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 768Mi
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          value: midterm
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: storage-secrets
+              key: RABBITMQ_PASSWORD
+        - name: RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS
+          value: +S 2:2 +A 4
+        readinessProbe:
+          tcpSocket: &id001
+            port: 5672
+          periodSeconds: 10
+          timeoutSeconds: 5
+        startupProbe:
+          tcpSocket: *id001
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/rabbitmq
+      securityContext:
+        fsGroup: 1000
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: storage-lab
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch-headless
+  namespace: storage-lab
+spec:
+  selector:
+    app: elasticsearch
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elasticsearch
+  namespace: storage-lab
+spec:
+  serviceName: elasticsearch-headless
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: elasticsearch
+  template:
+    metadata:
+      labels:
+        app: elasticsearch
+    spec:
+      containers:
+      - name: elasticsearch
+        image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 200m
+            memory: 768Mi
+          limits:
+            cpu: 1500m
+            memory: 1536Mi
+        env:
+        - name: discovery.type
+          value: single-node
+        - name: xpack.security.enabled
+          value: 'false'
+        - name: ES_JAVA_OPTS
+          value: -Xms384m -Xmx384m
+        readinessProbe:
+          httpGet:
+            path: /_cluster/health
+            port: 9200
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        startupProbe:
+          httpGet:
+            path: /
+            port: 9200
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 9200
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        volumeMounts:
+        - name: data
+          mountPath: /usr/share/elasticsearch/data
+      securityContext:
+        fsGroup: 1000
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: storage-lab
+spec:
+  selector:
+    app: ui
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: storage-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      containers:
+      - name: ui
+        image: distributed-storage-ui:lab-93fbcb6391fb
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        env:
+        - name: GATEWAY_1_ADDRESS
+          value: gateway-1.storage-lab.svc.cluster.local:8000
+        - name: GATEWAY_2_ADDRESS
+          value: gateway-2.storage-lab.svc.cluster.local:8000
+        ports:
+        - containerPort: 80
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: gateway
+  namespace: storage-lab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: gateway
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway
+  namespace: storage-lab
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: gateway
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: storage-lab
+data:
+  prometheus.yml: "global:\n  scrape_interval: 15s\nscrape_configs:\n- job_name: gateway\n\
+    \  kubernetes_sd_configs:\n  - namespaces:\n      names:\n      - storage-lab\n\
+    \    role: pod\n  relabel_configs:\n  - action: keep\n    regex: gateway\n   \
+    \ source_labels:\n    - __meta_kubernetes_pod_label_app\n  - replacement: $1:8000\n\
+    \    source_labels:\n    - __meta_kubernetes_pod_ip\n    target_label: __address__\n"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: storage-lab
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus
+  namespace: storage-lab
+rules:
+- apiGroups:
+  - ''
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: prometheus
+  namespace: storage-lab
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: storage-lab
+roleRef:
+  kind: Role
+  name: prometheus
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: storage-lab
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - name: http
+    port: 9090
+    targetPort: 9090
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: storage-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest@sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      serviceAccountName: prometheus
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  namespace: storage-lab
+data:
+  datasource.yaml: "apiVersion: 1\ndatasources:\n- access: proxy\n  isDefault: true\n\
+    \  name: Prometheus\n  type: prometheus\n  uid: prometheus\n  url: http://prometheus:9090\n"
+  provider.yaml: "apiVersion: 1\nproviders:\n- name: Storage\n  options:\n    path:\
+    \ /var/lib/grafana/dashboards\n  type: file\n"
+  storage.json: "{\n  \"uid\": \"storage-lab\",\n  \"title\": \"Distributed Object\
+    \ Storage\",\n  \"schemaVersion\": 39,\n  \"version\": 1,\n  \"refresh\": \"10s\"\
+    ,\n  \"time\": {\n    \"from\": \"now-30m\",\n    \"to\": \"now\"\n  },\n  \"\
+    panels\": [\n    {\n      \"id\": 1,\n      \"type\": \"timeseries\",\n      \"\
+    title\": \"Request throughput\",\n      \"gridPos\": {\n        \"x\": 0,\n  \
+    \      \"y\": 0,\n        \"w\": 12,\n        \"h\": 8\n      },\n      \"datasource\"\
+    : {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n    \
+    \  },\n      \"targets\": [\n        {\n          \"expr\": \"sum(rate(gateway_requests_total[2m]))\"\
+    ,\n          \"legendFormat\": \"{{node}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ],\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"reqps\"\n        }\n      },\n      \"options\": {\n        \"\
+    legend\": {\n          \"displayMode\": \"list\",\n          \"placement\": \"\
+    bottom\"\n        }\n      }\n    },\n    {\n      \"id\": 2,\n      \"type\"\
+    : \"timeseries\",\n      \"title\": \"Request latency p95\",\n      \"gridPos\"\
+    : {\n        \"x\": 12,\n        \"y\": 0,\n        \"w\": 12,\n        \"h\"\
+    : 8\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n  \
+    \      \"uid\": \"prometheus\"\n      },\n      \"targets\": [\n        {\n  \
+    \        \"expr\": \"histogram_quantile(0.95, sum by (le) (rate(gateway_request_seconds_bucket[5m])))\"\
+    ,\n          \"legendFormat\": \"{{node}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ],\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"s\"\n        }\n      },\n      \"options\": {\n        \"legend\"\
+    : {\n          \"displayMode\": \"list\",\n          \"placement\": \"bottom\"\
+    \n        }\n      }\n    },\n    {\n      \"id\": 3,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Upload throughput\",\n      \"gridPos\": {\n        \"x\"\
+    : 0,\n        \"y\": 8,\n        \"w\": 12,\n        \"h\": 8\n      },\n    \
+    \  \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\
+    \n      },\n      \"targets\": [\n        {\n          \"expr\": \"sum(rate(gateway_uploaded_bytes_total[2m]))\"\
+    ,\n          \"legendFormat\": \"{{node}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ],\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"Bps\"\n        }\n      },\n      \"options\": {\n        \"legend\"\
+    : {\n          \"displayMode\": \"list\",\n          \"placement\": \"bottom\"\
+    \n        }\n      }\n    },\n    {\n      \"id\": 4,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Node filesystem free\",\n      \"gridPos\": {\n        \"\
+    x\": 12,\n        \"y\": 8,\n        \"w\": 12,\n        \"h\": 8\n      },\n\
+    \      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\":\
+    \ \"prometheus\"\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"max by (node) (storage_node_free_bytes)\",\n          \"legendFormat\": \"\
+    {{node}}\",\n          \"refId\": \"A\"\n        }\n      ],\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"unit\": \"bytes\"\n        }\n     \
+    \ },\n      \"options\": {\n        \"legend\": {\n          \"displayMode\":\
+    \ \"list\",\n          \"placement\": \"bottom\"\n        }\n      }\n    },\n\
+    \    {\n      \"id\": 5,\n      \"type\": \"timeseries\",\n      \"title\": \"\
+    Chunk distribution\",\n      \"gridPos\": {\n        \"x\": 0,\n        \"y\"\
+    : 16,\n        \"w\": 12,\n        \"h\": 8\n      },\n      \"datasource\": {\n\
+    \        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n      },\n\
+    \      \"targets\": [\n        {\n          \"expr\": \"max by (node) (storage_node_chunks)\"\
+    ,\n          \"legendFormat\": \"{{node}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ],\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"short\"\n        }\n      },\n      \"options\": {\n        \"\
+    legend\": {\n          \"displayMode\": \"list\",\n          \"placement\": \"\
+    bottom\"\n        }\n      }\n    },\n    {\n      \"id\": 6,\n      \"type\"\
+    : \"timeseries\",\n      \"title\": \"Degraded objects\",\n      \"gridPos\":\
+    \ {\n        \"x\": 12,\n        \"y\": 16,\n        \"w\": 12,\n        \"h\"\
+    : 8\n      },\n      \"datasource\": {\n        \"type\": \"prometheus\",\n  \
+    \      \"uid\": \"prometheus\"\n      },\n      \"targets\": [\n        {\n  \
+    \        \"expr\": \"max(storage_degraded_objects)\",\n          \"legendFormat\"\
+    : \"{{node}}\",\n          \"refId\": \"A\"\n        }\n      ],\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"unit\": \"short\"\n        }\n     \
+    \ },\n      \"options\": {\n        \"legend\": {\n          \"displayMode\":\
+    \ \"list\",\n          \"placement\": \"bottom\"\n        }\n      }\n    },\n\
+    \    {\n      \"id\": 7,\n      \"type\": \"timeseries\",\n      \"title\": \"\
+    Repair completion rate\",\n      \"gridPos\": {\n        \"x\": 0,\n        \"\
+    y\": 24,\n        \"w\": 12,\n        \"h\": 8\n      },\n      \"datasource\"\
+    : {\n        \"type\": \"prometheus\",\n        \"uid\": \"prometheus\"\n    \
+    \  },\n      \"targets\": [\n        {\n          \"expr\": \"clamp_min(deriv(storage_repairs_completed[5m]),0)\"\
+    ,\n          \"legendFormat\": \"{{node}}\",\n          \"refId\": \"A\"\n   \
+    \     }\n      ],\n      \"fieldConfig\": {\n        \"defaults\": {\n       \
+    \   \"unit\": \"ops\"\n        }\n      },\n      \"options\": {\n        \"legend\"\
+    : {\n          \"displayMode\": \"list\",\n          \"placement\": \"bottom\"\
+    \n        }\n      }\n    },\n    {\n      \"id\": 8,\n      \"type\": \"timeseries\"\
+    ,\n      \"title\": \"Repair traffic rate\",\n      \"gridPos\": {\n        \"\
+    x\": 12,\n        \"y\": 24,\n        \"w\": 12,\n        \"h\": 8\n      },\n\
+    \      \"datasource\": {\n        \"type\": \"prometheus\",\n        \"uid\":\
+    \ \"prometheus\"\n      },\n      \"targets\": [\n        {\n          \"expr\"\
+    : \"clamp_min(deriv(storage_repair_payload_bytes[5m]),0)\",\n          \"legendFormat\"\
+    : \"{{node}}\",\n          \"refId\": \"A\"\n        }\n      ],\n      \"fieldConfig\"\
+    : {\n        \"defaults\": {\n          \"unit\": \"Bps\"\n        }\n      },\n\
+    \      \"options\": {\n        \"legend\": {\n          \"displayMode\": \"list\"\
+    ,\n          \"placement\": \"bottom\"\n        }\n      }\n    }\n  ]\n}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: storage-lab
+spec:
+  selector:
+    app: grafana
+  ports:
+  - name: http
+    port: 3000
+    targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: storage-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest@sha256:488984b716c0862639f91a698adbe2862677a5a07bad42da5f03f3030883b205
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 1000m
+            memory: 512Mi
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: storage-secrets
+              key: GRAFANA_PASSWORD
+        - name: GF_PLUGINS_PREINSTALL_DISABLED
+          value: 'true'
+        volumeMounts:
+        - name: config
+          mountPath: /etc/grafana/provisioning/datasources/datasource.yaml
+          subPath: datasource.yaml
+        - name: config
+          mountPath: /etc/grafana/provisioning/dashboards/provider.yaml
+          subPath: provider.yaml
+        - name: config
+          mountPath: /var/lib/grafana/dashboards/storage.json
+          subPath: storage.json
+      volumes:
+      - name: config
+        configMap:
+          name: grafana-config
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: internal-only
+  namespace: storage-lab
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector: {}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-ha
+  namespace: storage-lab
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11
+  bootstrap:
+    initdb:
+      database: storage
+      owner: storage
+      secret:
+        name: storage-db-auth
+  storage:
+    size: 20Gi
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-operator
+  namespace: storage-lab
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: postgres-ha
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cnpg-system
+    ports:
+    - protocol: TCP
+      port: 8000
+    - protocol: TCP
+      port: 5432

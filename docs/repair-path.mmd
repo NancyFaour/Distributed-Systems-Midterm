@@ -1,0 +1,14 @@
+flowchart TD
+    A[Missed heartbeat / failed node] --> C[Queued repair or scrub scan]
+    B[Periodic integrity scrub] --> C
+    C --> D[Worker locks affected chunk]
+    D --> E{Enough verified source data?}
+    E -- No --> X[Record degraded state; retry later]
+    E -- Yes --> F[Read healthy copy / decode k shards]
+    F --> G[Recreate missing fragment]
+    G --> H{Distinct healthy target available?}
+    H -- No --> X
+    H -- Yes --> I[Write and verify fragment]
+    I --> J[Commit placement and repair traffic]
+    J --> K[Clean obsolete copy when reachable]
+    K --> L[Update recovery dashboard]

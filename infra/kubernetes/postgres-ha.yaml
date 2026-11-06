@@ -1,0 +1,27 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-ha
+  namespace: storage-lab
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11
+  bootstrap:
+    initdb:
+      database: storage
+      owner: storage
+      secret:
+        name: storage-db-auth
+  storage:
+    size: 20Gi
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi

@@ -1,0 +1,14 @@
+flowchart TD
+    A[Authenticated GET / Range] --> B[Resolve bucket, key and version]
+    B --> V{Valid byte range?}
+    V -- No --> M[416 - Invalid range]
+    V -- Yes / no range --> C[Load ordered chunk manifest]
+    C --> D[Fetch R replicas or k RS shards]
+    D --> E{Enough fragments with valid hashes?}
+    E -- No --> X[503 - Data unavailable]
+    E -- Yes --> F[Select replica / decode RS]
+    F --> G[Verify logical chunk SHA-256]
+    G --> H[Reassemble object on temp disk]
+    H --> I{Range requested?}
+    I -- No --> J[200 - Stream full object]
+    I -- Yes --> L[206 - Stream byte range]

@@ -1,0 +1,6 @@
+apiVersion: 1
+providers:
+- name: Storage Lab
+  options:
+    path: /var/lib/grafana/dashboards
+  type: file

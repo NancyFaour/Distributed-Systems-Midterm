@@ -1,0 +1,16 @@
+flowchart TD
+    A[Object upload request] --> B{API key and rate limit valid?}
+    B -- No --> X[Reject request]
+    B -- Yes --> C[Spool to disk; fixed / rolling-hash chunks]
+    C --> D[Compute logical chunk SHA-256]
+    D --> E{Reusable chunk representation?}
+    E -- Yes --> F[Reuse stored fragments]
+    E -- No --> G[Consistent hash placement]
+    G --> H{Bucket policy}
+    H -- Replication --> I[Store N copies; require W]
+    H -- Reed-Solomon --> J[Encode k+m; store all shards]
+    I --> K[Commit metadata and reference counts]
+    J --> K
+    F --> K
+    K --> L[Queue Elasticsearch indexing]
+    K --> M[Return HTTP 201]

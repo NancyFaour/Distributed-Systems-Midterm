@@ -1,0 +1,58 @@
+flowchart TD
+    Client[User / React interface / HTTP client] --> Gateway[FastAPI gateway via Nginx]
+    Gateway --> Auth{API key and shared rate limit valid?}
+    Auth -- No --> Deny[401 / 429 response]
+    Auth -- Yes --> Operation{Operation}
+
+    subgraph Write[Write path]
+      Upload[Stream upload to temporary disk file] --> Chunk[Fixed-size or rolling-hash chunking]
+      Chunk --> Hash[SHA-256 for each logical chunk]
+      Hash --> Dedup{Chunk representation already stored?}
+      Dedup -- Yes --> Reuse[Verify existing copies and reuse bytes]
+      Dedup -- No --> Ring[Consistent hashing with virtual nodes]
+      Ring --> Policy{Bucket redundancy policy}
+      Policy -- Replication --> Copies[N copies; require W acknowledgements]
+      Policy -- Erasure coding --> Shards[k data + m parity; store all initial shards]
+      Copies --> Commit[Commit version, ordered hashes, tags and reference counts in PostgreSQL]
+      Shards --> Commit
+      Reuse --> Commit
+      Commit --> Outbox[Transactional search outbox]
+      Outbox --> Queue[RabbitMQ search job]
+      Queue --> Elastic[Elasticsearch metadata index]
+    end
+
+    subgraph Read[Read path]
+      Lookup[Resolve bucket, key and requested/latest version] --> Manifest[Read ordered chunk manifest and policy]
+      Manifest --> Fetch[Fetch R verified replicas or any k verified shards]
+      Fetch --> Verify[Verify physical fragment SHA-256 and reconstruct logical chunk]
+      Verify --> Whole[Verify logical chunk SHA-256; reconstruct object on temporary disk]
+      Whole --> Range[Return full object or requested byte range]
+    end
+
+    subgraph Recovery[Failure and repair path]
+      Heartbeat[Each node sends ID, free space and chunk count every 5 seconds] --> Registry[PostgreSQL heartbeat registry]
+      Registry --> Timeout{Heartbeat older than 15 seconds?}
+      Timeout -- Yes --> RepairQueue[Durable RabbitMQ repair job]
+      Scrub[Periodic scrub rereads stored fragments] --> Corrupt{Hash mismatch or unreadable fragment?}
+      Corrupt -- Yes --> RepairQueue
+      RepairQueue --> Worker[Worker claims job; locks logical chunk]
+      Worker --> Healthy{Enough verified source data?}
+      Healthy -- No --> Degraded[Record degraded/unrecoverable state and retry later]
+      Healthy -- Yes --> Rebuild[Copy replica or decode and re-encode missing shard]
+      Rebuild --> Spare{Distinct healthy target available?}
+      Spare -- No --> Degraded
+      Spare -- Yes --> Save[Verify write, commit new placement, record traffic]
+      Save --> GC[Remove obsolete copy after commit when old node is reachable]
+    end
+
+    Operation -- Upload --> Upload
+    Operation -- Download --> Lookup
+    Operation -- Search --> Elastic
+    Operation -- Cluster status --> Registry
+    Membership[Activate or remove a placement-ring member] --> BalanceQueue[RabbitMQ rebalance job]
+    BalanceQueue --> Migrate[Copy only changed assignments; verify; switch metadata; clean old copies]
+    Delete[Delete an object version] --> Refs[Decrement chunk and representation reference counts]
+    Refs --> Zero{Any references remain?}
+    Zero -- Yes --> Keep[Retain shared chunk bytes]
+    Zero -- No --> Collect[Delete unreferenced fragments; retry unavailable nodes]
+    Operation -- Delete --> Delete

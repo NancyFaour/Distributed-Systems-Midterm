@@ -25,6 +25,9 @@ if (-not (Test-Path .env)) {
 
 docker info --format '{{.ServerVersion}}'
 Assert-Exit 'Docker engine check: start Docker Desktop if needed'
-docker compose up -d --wait --wait-timeout 240
+& "$PSScriptRoot/init-env.ps1"
+docker compose build storage-node-1 ui
+Assert-Exit 'Build application images'
+docker compose up -d --no-build --wait --wait-timeout 360
 Assert-Exit 'Start supporting services'
 Write-Host 'Services ready. Run .venv\Scripts\python.exe scripts\verify.py to check messaging and monitoring.'

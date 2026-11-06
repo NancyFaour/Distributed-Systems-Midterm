@@ -1,0 +1,8 @@
+* text=auto
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.Dockerfile text eol=lf
+*.svg text eol=lf
+*.mmd text eol=lf
+*.docx binary
+*.png binary

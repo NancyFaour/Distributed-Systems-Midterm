@@ -8,3 +8,8 @@ __pycache__/
 ~$*
 ~WRL*.tmp
 data/
+ui/node_modules/
+ui/dist/
+.pytest_cache/
+infra/kubernetes/secret.local.yaml
+test-results/

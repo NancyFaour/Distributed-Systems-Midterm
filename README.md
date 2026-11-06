@@ -1,165 +1,88 @@
-# Distributed Systems Midterm: local environment
+# Distributed object storage lab
 
-Use Python 3.12, Git, Docker Desktop with its Linux engine, and kubectl on Windows.
-The existing Python requirements are installed in `.venv`. The GitHub repository
-is already initialized; a clone retains its history and `origin` remote.
+FastAPI storage nodes, PostgreSQL metadata, consistent hashing, SHA-256 chunk addressing, reference-counted deduplication, replication and Reed–Solomon 4+2 coding.
 
-## Start
+## Start tomorrow
 
-Open PowerShell in this repository:
+Start Docker Desktop, open this project in PyCharm and run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\finish-setup.ps1
+powershell -ExecutionPolicy Bypass -File scripts/start-lab.ps1
 ```
 
-This installs the Python dependencies, starts the four services, creates or checks
-the Kubernetes cluster, and verifies real Kafka/RabbitMQ messages and monitoring.
-Progress and the final `COMPLETE` or `FAILED` result are saved in `.setup-status.log`.
-The first run downloads large container images and may take a while.
+This creates the virtual environment and missing local credentials, builds images, applies idempotent schema migrations and starts services while preserving volumes. Select .venv/Scripts/python.exe as the PyCharm interpreter.
 
-To run just the supporting services and Python checks:
+Open **http://localhost:8080**. Use API_KEY from the ignored .env file. API documentation: **http://localhost:8080/api/docs**. Keep credentials out of screenshots and Git.
+
+Persistent PostgreSQL, RabbitMQ and Grafana accounts are initialized when their volumes are first created. Editing .env alone does not change an existing account password.
+
+Follow **[TESTING.md](TESTING.md)** for every test and screenshot checkpoint. Keep the existing single Word report. Use docs/framework-flowchart.mmd for the implementation-aligned write/read/failure-repair diagram, comparing it with your previously prepared flowchart.
+
+## Modules
+
+- Seven independent storage containers and volumes; five-second heartbeats, PUT/GET/HEAD/DELETE, upload/read SHA-256 verification and atomic writes.
+- PostgreSQL buckets, object versions, size/date/tags, ordered chunk hashes, locations and reference counts.
+- Fixed 4 MiB chunking or content-defined Rabin–Karp rolling-hash chunking; SHA-256 remains the content identifier.
+- Consistent hashing with 128 virtual nodes per physical node; queued copy-before-switch rebalancing on membership changes.
+- Deduplication shares chunk representations within the same redundancy policy. Different policies retain separate representations. Reference counts protect live objects during deletion.
+- Replication defaults to N=3, W=2, R=2, requiring W+R>N. Bucket-selectable zfec Reed–Solomon defaults to four data plus two parity shards. Initial EC writes require all six shards.
+- Automatic missed-heartbeat repair and periodic integrity scrubbing. Repairs require enough verified source data and distinct healthy targets.
+- Authenticated FastAPI JSON gateway: streaming uploads, full/range downloads, HEAD, versions, listing/deletion, metadata/tags, search, cluster status and shared PostgreSQL rate limiting.
+- React console: upload, download, browsing, metadata inspection, Elasticsearch search, node distribution and maintenance-job status.
+- Nginx balances two gateways. RabbitMQ distributes durable maintenance jobs across two workers, using publisher confirms, manual acknowledgements and PostgreSQL job/outbox state.
+- Prometheus application metrics and a provisioned Grafana storage dashboard.
+- Kubernetes manifests: StatefulSet/PVCs/probes, gateway replicas/HPA, workers, monitoring and optional three-instance CloudNativePG. Manifests are deployment assets; actual deployment and failover need runtime evidence.
+
+Version identifiers are generated globally in PostgreSQL. Versions of a particular object key need not have consecutive numbers.
+
+## Tests and workloads
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
-.\.venv\Scripts\python.exe main.py
-.\.venv\Scripts\python.exe scripts\verify.py
+python -m pytest tests/test_unit.py -q
+$env:RUN_INTEGRATION='1'
+python -m pytest tests/test_gateway.py -q
+python scripts/test-http.py --phase crud
+python scripts/test-http.py --phase search
+python scripts/test-http.py --phase balance
+python benchmark_redundancy.py --profile smoke --output test-results/benchmark-smoke.json
+python benchmark_redundancy.py --profile full --output test-results/benchmark-full.json
 ```
 
-The setup script creates `.venv` and a local `.env` if absent, installs Python
-dependencies, and starts the services. Docker Desktop must be running first.
-Activation is optional; to activate, use `.\.venv\Scripts\Activate.ps1`.
-Set PyCharm's project interpreter to `.venv\Scripts\python.exe` in this clone.
-`main.py` currently prints a greeting; it is not an HTTP application.
+The full profile compares 5,000 JSON files of 1–50 KiB and 10 binary files of 100 MiB under both policies. It measures payload storage and repair reads/writes and verifies downloaded SHA-256 before and after repair. Automatic scanning is temporarily paused for controlled per-policy measurement; separate failure tests demonstrate automatic repair. Run failure, corruption, persistence, rebalance and benchmark experiments sequentially.
 
-| Service | Local address | Login |
-| --- | --- | --- |
-| Prometheus | http://localhost:9090 | None |
-| Grafana | http://localhost:3000 | `GRAFANA_USER` / `GRAFANA_PASSWORD` in `.env` |
-| RabbitMQ management | http://localhost:15672 | `RABBITMQ_USER` / `RABBITMQ_PASSWORD` in `.env` |
-| RabbitMQ AMQP | localhost:5672 | Same RabbitMQ credentials |
-| Kafka | 127.0.0.1:9092 | Local development, plaintext |
-
-All published ports bind to loopback. Credentials are randomly generated in
-the ignored `.env` file. Keep this file local. To initialize another checkout,
-run the setup script or copy `.env.example` to `.env` and choose passwords.
-Credentials are initialized on the first creation of the corresponding data
-volume; editing `.env` alone does not change an existing account password.
-Container images are pinned by digest to preserve the selected builds.
-
-Containers reach Kafka at `kafka:19092`; host Python clients use `127.0.0.1:9092`.
-Grafana's Prometheus data source is provisioned automatically. Prometheus scrapes
-itself and RabbitMQ every 15 seconds. Application and Kafka metrics exporters
-can be added when implementing the distributed application.
-
-## Storage-node volumes
-
-Each of the four planned storage nodes has a dedicated Docker named volume.
-The storage-node application will mount its assigned volume at `/data`.
-
-| Node | Docker volume | Container mount |
-| --- | --- | --- |
-| storage-node-1 | distributed-systems-midterm_storage-node-1-data | /data |
-| storage-node-2 | distributed-systems-midterm_storage-node-2-data | /data |
-| storage-node-3 | distributed-systems-midterm_storage-node-3-data | /data |
-| storage-node-4 | distributed-systems-midterm_storage-node-4-data | /data |
-
-These volumes are declared in `compose.yaml`. Until node services are implemented,
-create them on another checkout with:
+The original step-by-step scripts remain available. An optional eighth node is used for actual movement tests:
 
 ```powershell
-1..4 | ForEach-Object {
-    docker volume create --label com.docker.compose.project=distributed-systems-midterm --label "com.docker.compose.volume=storage-node-$_-data" "distributed-systems-midterm_storage-node-$_-data"
-}
-docker volume ls --filter name=distributed-systems-midterm_storage-node-
+docker compose --profile scale up -d --no-build --wait storage-node-8
+python scripts/test-rebalance.py
 ```
 
-Volumes persist when a container is replaced. They are separate Docker volumes
-on one development computer; they do not provide separate physical disks or
-protection against loss of that computer. Backups and distributed redundancy
-will be addressed in later phases. Do not use `docker compose down -v` when
-you need to keep stored data.
+## Addresses
 
-For this phase's screenshot, open Docker Desktop's **Volumes** page, filter for
-`storage-node-`, and capture all four volumes and their names.
+| Service | Local address |
+|---|---|
+| React + Nginx | http://localhost:8080 |
+| Gateway documentation | http://localhost:8080/api/docs |
+| Node documentation | http://localhost:8001/docs through port 8007 |
+| Heartbeats | http://localhost:8010/nodes |
+| Recovery | http://localhost:8020/status and /events |
+| PostgreSQL | localhost:5433; DB/user storage; password in .env |
+| Elasticsearch | http://localhost:9200 |
+| Prometheus | http://localhost:9090 |
+| Grafana | http://localhost:3000; credentials in .env |
+| RabbitMQ management | http://localhost:15672; credentials in .env |
+| Kafka | localhost:9092; container address kafka:19092 |
 
-## Kubernetes cluster
+Development ports bind to loopback. Internal services trust the isolated lab network. The API key grants shared administrator access, not tenant isolation.
 
-This setup uses a dedicated kind cluster named `midterm`, running in Docker.
-The four supporting services run through Compose, separately from Kubernetes.
-The kind binary is stored locally under ignored `.tools`.
+## Deployment and limits
 
-To install kind on a fresh checkout, follow the official Windows instructions:
-https://kind.sigs.k8s.io/docs/user/quick-start/#installing-from-release-binaries
-or run `winget install Kubernetes.kind` and use `kind` in place of `.\.tools\kind.exe`.
+Read **[DEPLOYMENT.md](DEPLOYMENT.md)** for kind, cloud prerequisites, PostgreSQL HA, autoscaling and evidence. Cloud provisioning, image publishing and HTTPS require a selected provider and configured account.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup-kubernetes.ps1
-kubectl --context kind-midterm get nodes
-kubectl --context kind-midterm get pods -A
-```
+This is an educational S3-like JSON API, without AWS SigV4/XML compatibility. Deleting the latest version exposes an older version when one remains; there are no S3 delete markers. Uploads/downloads spool to temporary disk to bound Python RAM. Byte-range downloads currently reconstruct the complete object first. Elasticsearch is an eventually consistent metadata projection and search includes object versions.
 
-Explicitly use `--context kind-midterm` for this project's Kubernetes commands.
-The cluster provides a development target for later application manifests.
+Local containers share one host failure domain and disk free-space pool. Free-space values must not be summed. Insufficient source fragments or replacement capacity leave objects degraded. Hard host/process crashes between physical writes and metadata commit can leave orphan bytes; normal failed writes are queued for cleanup. The local database is a single instance; metadata HA is only established after the optional replicated deployment and failover tests.
 
-## Manage the environment
+Use docker compose stop to preserve data. Avoid volume deletion when retaining stored objects and report fixtures. The original main.py is a PyCharm greeting, not the gateway.
 
-```powershell
-docker compose ps
-docker compose logs --tail 100
-docker compose stop
-docker compose start
-```
-
-Named volumes preserve broker and monitoring data. `docker compose down` removes
-the project's containers and network while keeping these volumes. Adding `-v`
-also deletes the stored data. The smoke check uses a temporary RabbitMQ queue
-and writes a small message to Kafka topic `environment-smoke-check`.
-
-## Object metadata and placement tests
-
-`object_store.py` connects the fixed-size chunker, consistent hashing ring,
-PostgreSQL metadata, and the four running storage-node HTTP APIs. Run this
-coordinator module from the project virtual environment; PostgreSQL is exposed
-on loopback port 5433 and the nodes on ports 8001 through 8004.
-
-The database schema is in `infra/postgres/schema.sql`. `metadata_db.py` reads the
-local database password from the ignored `.env`. Object versions retain the
-bucket, key, byte size, generated version identifier, creation timestamp, and
-ordered chunk references. Version identifiers are globally generated database
-identifiers; consecutive versions of a particular key need not be consecutive
-integers.
-
-Run these phases in order, taking a screenshot after each PASS result:
-
-```powershell
-python test_object_store.py upload
-python test_object_store.py dedup
-python test_object_store.py read
-python test_object_store.py delete-first
-python test_object_store.py delete-last
-```
-
-The demo file contains three logical chunks, including a repeated chunk, so
-only two unique chunks need physical storage. Reference counts measure ordered
-chunk occurrences: after two identical objects, counts are 4 and 2. Deleting
-the first object leaves counts 2 and 1 and the second object remains readable.
-Deleting the final object removes the unreferenced chunk rows and physical data.
-PostgreSQL transactions and consistently ordered advisory locks protect updates
-from overlapping writers. Chunk deletion runs after logical object deletion
-commits; unavailable nodes leave zero-reference rows for explicit retry through
-`collect_unreferenced`, rather than deleting a live object's metadata.
-
-This stage uses fixed-size chunking and one stored copy per unique chunk.
-Content-defined chunking, automatic migration, replication, erasure coding,
-and repair are subsequent phases. Placement tests measure logical reassignment
-of 10,000 deterministic sample hashes; they do not measure physical migration.
-An upload interrupted before its database commit can leave unreferenced bytes
-on a node; a complete orphan reconciliation job is not implemented yet.
-
-## Technical references
-
-- [Docker Desktop Kubernetes](https://docs.docker.com/desktop/use-desktop/kubernetes/)
-- [kind installation and clusters](https://kind.sigs.k8s.io/docs/user/quick-start/)
-- [Kafka Docker image](https://kafka.apache.org/41/getting-started/docker/)
-- [Prometheus Docker installation](https://prometheus.io/docs/prometheus/latest/installation/)
-- [Grafana Docker installation](https://grafana.com/docs/grafana/latest/setup-grafana/installation/docker/)
+References: [FastAPI requests](https://fastapi.tiangolo.com/advanced/using-request-directly/), [Elasticsearch Docker](https://www.elastic.co/docs/deploy-manage/deploy/self-managed/install-elasticsearch-docker-basic), [RabbitMQ acknowledgements](https://www.rabbitmq.com/docs/confirms), [Kubernetes StatefulSets](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/).
